@@ -1,0 +1,194 @@
+service: LambdaFunction
+description: The AWS CF Serverless template for Function-${opt:stage}
+
+# You can pin your service to only deploy with a specific Serverless version
+# Check out our docs for more details
+frameworkVersion: "=1.8.0"
+
+
+plugins:
+  - serverless-plugin-lambda-dead-letter
+
+
+custom:
+  dev:
+    vpc: [vpc-dev-id]
+    subnet1: [subnet1-dev-id]
+    subnet2: [subnet2-dev-id]
+    subnet3: [subnet3-dev-id]
+    role: FunctionLambdaRole-dev
+    DefaultDaysBoundary: 7
+    ESEndpoint: search-xxxxxx.eu-west-1.es.amazonaws.com
+    FunctionConf: http://s3-eu-west-1.amazonaws.com/[bucket-name]/[key]/curator_retention_conf.csv
+    AWSAKEYID: XXXXXX
+    AWSSAKEYID: XXXXXX
+  rec:
+    vpc: [vpc-rec-id]
+    subnet1: [subnet1-rec-id]
+    subnet2: [subnet2-rec-id]
+    subnet3: [subnet3-rec-id]
+    role: FunctionLambdaRole-rec
+    DefaultDaysBoundary: 7
+    ESEndpoint: search-xxxxxx.eu-west-1.es.amazonaws.com
+    FunctionConf: http://s3-eu-west-1.amazonaws.com/[bucket-name]/[key]/curator_retention_conf.csv
+    AWSAKEYID: XXXXXX
+    AWSSAKEYID: XXXXXX
+  prod:
+    vpc: [vpc-prod-id]
+    subnet1: [subnet1-prod-id]
+    subnet2: [subnet2-prod-id]
+    subnet3: [subnet3-prod-id]
+    role: FunctionLambdaRole-prod
+    DefaultDaysBoundary: 15
+    ESEndpoint: search-xxxxxx.eu-west-1.es.amazonaws.com
+    FunctionConf: http://s3-eu-west-1.amazonaws.com/[bucket-name]/[key]/curator_retention_conf.csv
+    AWSAKEYID: XXXXXX
+    AWSSAKEYID: XXXXXX
+
+package:
+  exclude:
+    - README.md
+    - setup.cfg
+  include:
+    - hello.py
+
+provider:
+  name: aws
+  runtime: python2.7
+  region: [your-region-name]
+  vpc:
+    subnetIds:
+      - ${self:custom.${opt:stage}.subnet1}
+      - ${self:custom.${opt:stage}.subnet2}
+      - ${self:custom.${opt:stage}.subnet3}
+  stage: ${opt:stage, dev}
+  deploymentBucket: applications.${opt:stage}
+  versionFunctions: false
+
+
+functions:
+  curator:
+    name: FunctionLambda-${opt:stage}
+    description: FunctionLambda-${opt:stage}
+    role: FunctionLambdaRole
+    handler: handler.hello
+    vpc:
+      securityGroupIds:
+        - Ref: FunctionLambdaSG
+    memorySize: 1024
+    timeout: 60
+    environment:
+      ESEndpoint: ${self:custom.${opt:stage}.EFKEndpoint}
+      FunctionConf: ${self:custom.${opt:stage}.EFKCuratorConf}
+      DefaultDaysBoundary: ${self:custom.${opt:stage}.DefaultDaysBoundary}
+      AWSAKEYID: ${self:custom.${opt:stage}.AWSAKEYID}
+      AWSSAKEYID: ${self:custom.${opt:stage}.AWSSAKEYID}
+    deadLetter:
+      sqs:
+        queueName: dlq-FunctionLambdaRole-${opt:stage}
+        delaySeconds: 60
+        maximumMessageSize: 2048
+        messageRetentionPeriod: 200000
+        receiveMessageWaitTimeSeconds: 15
+        visibilityTimeout: 300
+    events:
+      - schedule: cron(0 0 */1 * ? *)
+
+resources:
+  Resources:
+
+    FunctionLambdaRole:
+      Type: AWS::IAM::Role
+      Properties:
+        Path: /
+        RoleName: ${self:custom.${opt:stage}.role}
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaENIManagementAccess
+        Policies:
+          - PolicyName: LambdaNetworkManagementPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - ec2:DescribeInstances
+                    - ec2:CreateNetworkInterface
+                    - ec2:AttachNetworkInterface
+                    - ec2:DescribeNetworkInterfaces
+                    - ec2:DeleteNetworkInterface
+                    - ec2:DetachNetworkInterface
+                    - ec2:ModifyNetworkInterfaceAttribute
+                    - ec2:ResetNetworkInterfaceAttribute
+                    - autoscaling:CompleteLifecycleAction
+                  Resource:
+                    Fn::Join: [":", ["arn:aws:lambda", "${self:provider.region}", Ref: "AWS::AccountId", "function", "FunctionLambda-${opt:stage}"]]
+          - PolicyName: WriteToDLQPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - sqs:SendMessage
+                  Resource:
+                    Fn::Join: [":", ["arn:aws:sqs", "${self:provider.region}", Ref: "AWS::AccountId", "dlq-FunctionLambdaRole-${opt:stage}"]]
+          - PolicyName: ESConfBucketAccessPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:Get*
+                    - s3:List*
+                  Resource:
+#                    - Fn::Join: [ "", ["arn:aws:s3:::*"] ]
+                    - Fn::Join: [ "", ["arn:aws:s3:::[bucket-name]", "${opt:stage}"] ]
+                    - Fn::Join: [ "", ["arn:aws:s3:::[bucket-name]", "${opt:stage}", "/*"] ]
+          - PolicyName: ESDomainAccessPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - es:*
+                  Resource:
+                    Fn::Join: [ "", ["arn:aws:es:eu-west-1:", Ref: "AWS::AccountId", ":domain/[es-domain-name]", "${opt:stage}", "/*"] ]
+
+
+    FunctionLambdaSG:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: "SecurityGroup to access from http to lambda"
+        VpcId: ${self:custom.${opt:stage}.vpc}
+        SecurityGroupIngress:
+          - IpProtocol: "tcp"
+            FromPort: 80
+            ToPort: 80
+            CidrIp: "0.0.0.0/0"
+
+
+    FunctionDeploymentLambdaUser:
+      Type: AWS::IAM::User
+      Properties:
+          Policies:
+          - PolicyName: lambda_deployment_policy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Action:
+                  - "lambda:UpdateFunctionCode"
+                  - "lambda:PublishVersion"
+                  - "lambda:GetFunction"
+                  - "lambda:GetFunctionConfiguration"
+                  - "lambda:ListVersionsByFunction"
+                  Resource:
+                    Fn::Join: [":", ["arn:aws:lambda", "${self:provider.region}", Ref: "AWS::AccountId", "function", "FunctionLambda-${opt:stage}"]]
+                  Effect: Allow
